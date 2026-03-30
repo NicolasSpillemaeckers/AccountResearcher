@@ -15,6 +15,13 @@ _HEADERS = {
 _TIMEOUT = 10
 _MAX_CONTENT_LENGTH = 8000
 
+_LINKEDIN_DOMAINS = {"linkedin.com", "www.linkedin.com"}
+
+
+def _is_linkedin_url(url: str) -> bool:
+    """Return True if the URL belongs to linkedin.com."""
+    return urlparse(url).netloc.lower() in _LINKEDIN_DOMAINS
+
 
 def _fetch_html(url: str) -> tuple[str, str]:
     """Fetch a URL and return (html_content, final_url)."""
@@ -30,6 +37,19 @@ def _clean_text(soup: BeautifulSoup) -> str:
     text = soup.get_text(separator="\n", strip=True)
     lines = [line for line in text.splitlines() if line.strip()]
     return "\n".join(lines)
+
+
+def _extract_meta_tags(soup: BeautifulSoup) -> dict[str, str]:
+    """Extract Open Graph and standard meta tags from a BeautifulSoup object."""
+    meta: dict[str, str] = {}
+    for tag in soup.find_all("meta"):
+        name = tag.get("property") or tag.get("name") or ""
+        content = tag.get("content", "")
+        if name and content:
+            meta[name.lower()] = content
+    if soup.title:
+        meta["title"] = soup.title.get_text(strip=True)
+    return meta
 
 
 @tool
@@ -77,6 +97,75 @@ def fetch_webpage(url: str) -> str:
         return f"Error: HTTP {e.response.status_code} for {url}"
     except Exception as e:  # noqa: BLE001
         return f"Error fetching {url}: {e}"
+
+
+@tool
+def fetch_linkedin_page(url: str) -> str:
+    """Fetch a LinkedIn company or profile page and extract available public information.
+
+    LinkedIn restricts access to logged-in users for most content, so this tool
+    extracts whatever is publicly visible: Open Graph metadata, page title, and
+    any text that is rendered without authentication.
+
+    Use this tool whenever a LinkedIn URL is provided as a source.
+
+    Args:
+        url: The LinkedIn URL to fetch (e.g. https://www.linkedin.com/company/example).
+
+    Returns:
+        A summary of the publicly available information from the LinkedIn page,
+        including company name, description, and any other accessible details.
+    """
+    if not _is_linkedin_url(url):
+        return f"Error: {url} is not a LinkedIn URL. Use fetch_webpage for non-LinkedIn pages."
+    try:
+        html, final_url = _fetch_html(url)
+        soup = BeautifulSoup(html, "lxml")
+        meta = _extract_meta_tags(soup)
+
+        lines = [f"LinkedIn page: {final_url}", ""]
+
+        og_title = meta.get("og:title") or meta.get("title", "")
+        if og_title:
+            name = og_title.replace(" | LinkedIn", "").strip()
+            lines.append(f"Name: {name}")
+
+        og_description = meta.get("og:description") or meta.get("description", "")
+        if og_description:
+            lines.append(f"Description: {og_description}")
+
+        og_image = meta.get("og:image", "")
+        if og_image:
+            lines.append(f"Image URL: {og_image}")
+
+        visible_text = _clean_text(soup)
+        auth_wall_signals = [
+            "sign in", "log in", "join linkedin", "join now to see",
+            "authwall", "sign up",
+        ]
+        is_blocked = any(sig in visible_text.lower() for sig in auth_wall_signals)
+        if is_blocked:
+            lines.append("")
+            lines.append(
+                "Note: LinkedIn requires authentication to display full content. "
+                "Only publicly available metadata is shown above."
+            )
+        else:
+            if len(visible_text) > _MAX_CONTENT_LENGTH:
+                visible_text = visible_text[:_MAX_CONTENT_LENGTH] + "\n...[content truncated]"
+            if visible_text:
+                lines.append("")
+                lines.append(visible_text)
+
+        return "\n".join(lines)
+    except requests.exceptions.Timeout:
+        return f"Error: Request timed out for {url}"
+    except requests.exceptions.ConnectionError:
+        return f"Error: Could not connect to {url}"
+    except requests.exceptions.HTTPError as e:
+        return f"Error: HTTP {e.response.status_code} for {url}"
+    except Exception as e:  # noqa: BLE001
+        return f"Error fetching LinkedIn page {url}: {e}"
 
 
 @tool
@@ -157,4 +246,4 @@ def extract_links(url: str) -> str:
         return f"Error extracting links from {url}: {e}"
 
 
-TOOLS = [fetch_webpage, extract_links]
+TOOLS = [fetch_webpage, fetch_linkedin_page, extract_links]

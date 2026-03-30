@@ -2,74 +2,106 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 from langchain_core.messages import AIMessage
 
-from src.agent import create_website_researcher, research_website
+from src.agent import create_account_researcher, research_account
 
 
-class TestCreateWebsiteResearcher:
-    def test_returns_agent_executor(self):
-        from langchain.agents import AgentExecutor
+class TestCreateAccountResearcher:
+    def test_returns_compiled_state_graph(self):
+        from langgraph.graph.state import CompiledStateGraph
 
         with patch("src.agent.ChatOpenAI") as mock_llm_cls:
             mock_llm = MagicMock()
-            mock_llm.bind_tools.return_value = mock_llm
             mock_llm_cls.return_value = mock_llm
-            executor = create_website_researcher()
-        assert isinstance(executor, AgentExecutor)
+            researcher = create_account_researcher()
+        assert isinstance(researcher, CompiledStateGraph)
 
     def test_uses_default_model(self):
         with patch("src.agent.ChatOpenAI") as mock_llm_cls, patch.dict(
             "os.environ", {"OPENAI_MODEL": "gpt-4o-mini"}, clear=False
         ):
             mock_llm = MagicMock()
-            mock_llm.bind_tools.return_value = mock_llm
             mock_llm_cls.return_value = mock_llm
-            create_website_researcher()
+            create_account_researcher()
         mock_llm_cls.assert_called_once_with(model="gpt-4o-mini", temperature=0)
 
     def test_uses_custom_model(self):
         with patch("src.agent.ChatOpenAI") as mock_llm_cls:
             mock_llm = MagicMock()
-            mock_llm.bind_tools.return_value = mock_llm
             mock_llm_cls.return_value = mock_llm
-            create_website_researcher(model="gpt-4o")
+            create_account_researcher(model="gpt-4o")
         mock_llm_cls.assert_called_once_with(model="gpt-4o", temperature=0)
 
-    def test_executor_has_correct_tools(self):
-        from src.tools import extract_links, fetch_webpage
+    def test_agent_has_all_tools(self):
+        from src.tools import extract_links, fetch_linkedin_page, fetch_webpage
 
         with patch("src.agent.ChatOpenAI") as mock_llm_cls:
             mock_llm = MagicMock()
-            mock_llm.bind_tools.return_value = mock_llm
             mock_llm_cls.return_value = mock_llm
-            executor = create_website_researcher()
+            researcher = create_account_researcher()
 
-        tool_names = {t.name for t in executor.tools}
-        assert "fetch_webpage" in tool_names
-        assert "extract_links" in tool_names
+        tool_names = {node for node in researcher.nodes}
+        assert "tools" in tool_names
 
 
-class TestResearchWebsite:
+class TestResearchAccount:
+    def _make_mock_agent(self, output_text: str) -> MagicMock:
+        ai_message = AIMessage(content=output_text)
+        mock_agent = MagicMock()
+        mock_agent.invoke.return_value = {"messages": [ai_message]}
+        return mock_agent
+
     def test_returns_string_output(self):
-        mock_executor = MagicMock()
-        mock_executor.invoke.return_value = {"output": "Research report for example.com"}
-        with patch("src.agent.create_website_researcher", return_value=mock_executor):
-            result = research_website("https://example.com")
-        assert result == "Research report for example.com"
+        mock_agent = self._make_mock_agent("Research report for acme.com")
+        with patch("src.agent.create_account_researcher", return_value=mock_agent):
+            result = research_account(["https://acme.com"])
+        assert result == "Research report for acme.com"
 
-    def test_invokes_with_correct_url(self):
-        mock_executor = MagicMock()
-        mock_executor.invoke.return_value = {"output": "Report"}
-        with patch("src.agent.create_website_researcher", return_value=mock_executor):
-            research_website("https://example.com")
-        mock_executor.invoke.assert_called_once_with(
-            {"input": "Research the following website: https://example.com"}
-        )
+    def test_includes_website_source_in_prompt(self):
+        mock_agent = self._make_mock_agent("Report")
+        with patch("src.agent.create_account_researcher", return_value=mock_agent):
+            research_account(["https://acme.com"])
+        call_args = mock_agent.invoke.call_args[0][0]
+        prompt_text = call_args["messages"][0].content
+        assert "https://acme.com" in prompt_text
+        assert "website" in prompt_text
 
-    def test_passes_model_to_executor(self):
-        mock_executor = MagicMock()
-        mock_executor.invoke.return_value = {"output": "Report"}
-        with patch("src.agent.create_website_researcher", return_value=mock_executor) as mock_create:
-            research_website("https://example.com", model="gpt-4o")
+    def test_includes_linkedin_source_in_prompt(self):
+        mock_agent = self._make_mock_agent("Report")
+        with patch("src.agent.create_account_researcher", return_value=mock_agent):
+            research_account(["https://www.linkedin.com/company/acme"])
+        call_args = mock_agent.invoke.call_args[0][0]
+        prompt_text = call_args["messages"][0].content
+        assert "linkedin.com" in prompt_text
+        assert "LinkedIn" in prompt_text
+
+    def test_includes_both_sources_in_prompt(self):
+        mock_agent = self._make_mock_agent("Report")
+        with patch("src.agent.create_account_researcher", return_value=mock_agent):
+            research_account(
+                ["https://acme.com", "https://www.linkedin.com/company/acme"]
+            )
+        call_args = mock_agent.invoke.call_args[0][0]
+        prompt_text = call_args["messages"][0].content
+        assert "https://acme.com" in prompt_text
+        assert "linkedin.com" in prompt_text
+
+    def test_passes_model_to_researcher(self):
+        mock_agent = self._make_mock_agent("Report")
+        with patch("src.agent.create_account_researcher", return_value=mock_agent) as mock_create:
+            research_account(["https://acme.com"], model="gpt-4o")
         mock_create.assert_called_once_with(model="gpt-4o")
+
+    def test_raises_on_empty_sources(self):
+        with pytest.raises(ValueError, match="At least one source"):
+            research_account([])
+
+    def test_multiple_sources_invoke_once(self):
+        mock_agent = self._make_mock_agent("Report")
+        with patch("src.agent.create_account_researcher", return_value=mock_agent):
+            research_account(
+                ["https://acme.com", "https://www.linkedin.com/company/acme"]
+            )
+        assert mock_agent.invoke.call_count == 1

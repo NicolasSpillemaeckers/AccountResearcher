@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-from src.tools import extract_links, fetch_webpage
+from src.tools import extract_links, fetch_linkedin_page, fetch_webpage
 
 _SAMPLE_HTML = """
 <html>
@@ -28,6 +28,21 @@ _SAMPLE_HTML = """
   </main>
   <script>alert("ignored")</script>
   <style>.ignored { color: red; }</style>
+</body>
+</html>
+"""
+
+_LINKEDIN_HTML = """
+<html>
+<head>
+  <title>Acme Corp | LinkedIn</title>
+  <meta property="og:title" content="Acme Corp | LinkedIn">
+  <meta property="og:description"
+        content="Acme Corp is a cloud software company with 500 employees.">
+  <meta property="og:image" content="https://media.licdn.com/acme-logo.png">
+</head>
+<body>
+  <p>Sign in to view full profile</p>
 </body>
 </html>
 """
@@ -93,6 +108,60 @@ class TestFetchWebpage:
         with patch("src.tools.requests.get", return_value=_make_response(long_html)):
             result = fetch_webpage.invoke("https://acme.com")
         assert "truncated" in result
+
+
+class TestFetchLinkedInPage:
+    def test_extracts_company_name_from_og_title(self):
+        resp = _make_response(_LINKEDIN_HTML, url="https://www.linkedin.com/company/acme")
+        with patch("src.tools.requests.get", return_value=resp):
+            result = fetch_linkedin_page.invoke("https://www.linkedin.com/company/acme")
+        assert "Acme Corp" in result
+        assert "| LinkedIn" not in result
+
+    def test_extracts_og_description(self):
+        resp = _make_response(_LINKEDIN_HTML, url="https://www.linkedin.com/company/acme")
+        with patch("src.tools.requests.get", return_value=resp):
+            result = fetch_linkedin_page.invoke("https://www.linkedin.com/company/acme")
+        assert "500 employees" in result
+
+    def test_notes_auth_wall(self):
+        resp = _make_response(_LINKEDIN_HTML, url="https://www.linkedin.com/company/acme")
+        with patch("src.tools.requests.get", return_value=resp):
+            result = fetch_linkedin_page.invoke("https://www.linkedin.com/company/acme")
+        assert "authentication" in result.lower() or "sign in" in result.lower()
+
+    def test_rejects_non_linkedin_url(self):
+        result = fetch_linkedin_page.invoke("https://acme.com")
+        assert "Error" in result
+        assert "not a LinkedIn URL" in result
+
+    def test_timeout_returns_error_message(self):
+        with patch("src.tools.requests.get", side_effect=requests.exceptions.Timeout):
+            result = fetch_linkedin_page.invoke("https://www.linkedin.com/company/acme")
+        assert "Error" in result
+        assert "timed out" in result
+
+    def test_connection_error_returns_error_message(self):
+        with patch("src.tools.requests.get", side_effect=requests.exceptions.ConnectionError):
+            result = fetch_linkedin_page.invoke("https://www.linkedin.com/company/acme")
+        assert "Error" in result
+        assert "connect" in result.lower()
+
+    def test_http_error_returns_status_code(self):
+        error_response = MagicMock()
+        error_response.status_code = 999
+        http_error = requests.exceptions.HTTPError(response=error_response)
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = http_error
+        with patch("src.tools.requests.get", return_value=mock_resp):
+            result = fetch_linkedin_page.invoke("https://www.linkedin.com/company/acme")
+        assert "999" in result
+
+    def test_includes_linkedin_url_in_output(self):
+        resp = _make_response(_LINKEDIN_HTML, url="https://www.linkedin.com/company/acme")
+        with patch("src.tools.requests.get", return_value=resp):
+            result = fetch_linkedin_page.invoke("https://www.linkedin.com/company/acme")
+        assert "linkedin.com" in result
 
 
 class TestExtractLinks:
